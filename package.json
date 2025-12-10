@@ -1,0 +1,25 @@
+{
+  "name": "backend-course-2025-6",
+  "version": "1.0.0",
+  "description": "Лабораторна робота — Node.js CLI і веб-сервер",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [],
+  "author": "Angelina bc2025-6",
+  "license": "ISC",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "superagent": "^9.0.2",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

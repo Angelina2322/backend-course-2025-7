@@ -1,30 +1,40 @@
+version: "3.9"
+
 services:
-  app:
+  backend_app:
     build: .
-    container_name: backend_app
+    container_name: backend-lab-7
     ports:
-      - "3000:3000"
-    env_file:
-      - .env
+      - "4000:3000"      # порт Node.js
+      - "9229:9229"      # порт для дебагу
     depends_on:
-      - db
+      - backend_db
+    environment:
+      HOST: "0.0.0.0"
+      PORT: ${PORT:-3000}
+      DB_HOST: backend_db
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-rootpassword}
+      DB_NAME: ${DB_NAME:-inventorydb}
+      CACHE_DIR: ${CACHE_DIR:-/app/cache}
     volumes:
-      - .:/app
+      - ./:/app
       - /app/node_modules
+      - app_cache:/app/cache
     command: npm run dev
 
-  db:
-    image: mysql:8
-    container_name: backend_db
+  backend_db:
+    image: mysql:8.0
+    container_name: mysql-db-7
     restart: always
-    ports:
-      - "3307:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: angelina27
-      MYSQL_DATABASE: mydb
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-inventorydb}
+    ports:
+      - "3307:3306"     # щоб не конфліктував з локальним MySQL
     volumes:
       - db_data:/var/lib/mysql
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
 
 volumes:
+  app_cache:
   db_data:

@@ -1,26 +1,52 @@
-import { Command } from "commander";
-import express from "express";
-import multer from "multer";
-import fs from "fs";
-import path from "path";
-import swaggerUi from "swagger-ui-express";
-import swaggerJSDoc from "swagger-jsdoc";
+import dotenv from 'dotenv';
+dotenv.config();
 
-const program = new Command();
+import express from 'express';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
+import mysql from 'mysql2/promise';
+import swaggerUi from 'swagger-ui-express';
+import swaggerJSDoc from 'swagger-jsdoc';
 
-program
-  .requiredOption("-h, --host <host>", "server host")
-  .requiredOption("-p, --port <port>", "server port")
-  .requiredOption("-c, --cache <path>", "path to cache directory");
+// ===================== CONFIG =====================
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const CACHE_DIR = process.env.CACHE_DIR || './cache';
+const DB_HOST = process.env.DB_HOST || 'backend_db';
+const DB_USER = process.env.DB_USER || 'root';
+const DB_PASSWORD = process.env.DB_PASSWORD || 'rootpassword';
+const DB_NAME = process.env.DB_NAME || 'inventorydb';
 
-program.parse(process.argv);
-const options = program.opts();
+// Створюємо кеш-директорію, якщо її немає
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-// Перевіряємо директорію кешу
-if (!fs.existsSync(options.cache)) {
-  console.log(`Cache directory not found. Creating: ${options.cache}`);
-  fs.mkdirSync(options.cache, { recursive: true });
+// ===================== MYSQL =====================
+let db;
+while (!db) {
+  try {
+    db = await mysql.createConnection({
+      host: DB_HOST,
+      user: DB_USER,
+      password: DB_PASSWORD,
+      database: DB_NAME,
+    });
+    console.log('✅ MySQL підключено');
+  } catch (err) {
+    console.log('⏳ Чекаю MySQL...');
+    await new Promise(res => setTimeout(res, 2000)); // чекаємо 2 секунди
+  }
 }
+
+// Створимо таблицю, якщо не існує
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS inventory (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    inventory_name VARCHAR(255) NOT NULL,
+    description TEXT,
+    photo VARCHAR(255)
+  )
+`);
 
 // ===================== EXPRESS SERVER =====================
 const app = express();
@@ -29,39 +55,34 @@ app.use(express.urlencoded({ extended: true }));
 
 // ===================== MULTER =====================
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, options.cache),
+  destination: (req, file, cb) => cb(null, CACHE_DIR),
   filename: (req, file, cb) => cb(null, Date.now() + "-" + file.originalname)
 });
 const upload = multer({ storage });
 
-// ===================== БАЗА ДАНИХ =====================
-let inventory = [];
-
 // ===================== SWAGGER =====================
 const swaggerOptions = {
   definition: {
-    openapi: "3.0.0",
+    openapi: '3.0.0',
     info: {
-      title: "Inventory API",
-      version: "1.0.0",
-      description: "API для реєстрації та пошуку пристроїв"
+      title: 'Inventory API',
+      version: '1.0.0',
+      description: 'API для реєстрації та пошуку пристроїв'
     },
-    servers: [{ url: `http://localhost:${options.port}` }]
+    servers: [{ url: `http://localhost:${PORT}` }]
   },
-  apis: ["/app/index.js"]
+  apis: ['./index.js']
 };
 const swaggerSpec = swaggerJSDoc(swaggerOptions);
-app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// ===================== ЕНДПОІНТИ =====================
+// ===================== ENDPOINTS =====================
 
 /**
  * @swagger
  * /register:
  *   post:
- *     summary: Реєстрація нового пристрою
- *     tags:
- *       - Inventory
+ *     summary: Додати новий пристрій
  *     requestBody:
  *       required: true
  *       content:
@@ -71,55 +92,47 @@ app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
  *             properties:
  *               inventory_name:
  *                 type: string
- *                 description: Назва пристрою
  *               description:
  *                 type: string
- *                 description: Опис пристрою
  *               photo:
  *                 type: string
  *                 format: binary
- *                 description: Фото пристрою
  *     responses:
  *       201:
- *         description: Пристрій успішно створено
- *       400:
- *         description: Не передано inventory_name
+ *         description: Пристрій додано
  */
-app.post("/register", upload.single("photo"), (req, res) => {
+app.post('/register', upload.single('photo'), async (req, res) => {
   const { inventory_name, description } = req.body;
-  if (!inventory_name) return res.status(400).json({ error: "inventory_name is required" });
+  if (!inventory_name) return res.status(400).json({ error: 'inventory_name is required' });
 
-  const newItem = {
-    id: inventory.length > 0 ? inventory[inventory.length - 1].id + 1 : 1,
-    inventory_name,
-    description: description || "",
-    photo: req.file ? req.file.filename : null
-  };
+  const [result] = await db.execute(
+    'INSERT INTO inventory (inventory_name, description, photo) VALUES (?, ?, ?)',
+    [inventory_name, description || '', req.file ? req.file.filename : null]
+  );
 
-  inventory.push(newItem);
-  res.status(201).json(newItem);
+  const [item] = await db.execute('SELECT * FROM inventory WHERE id = ?', [result.insertId]);
+  res.status(201).json(item[0]);
 });
 
 /**
  * @swagger
  * /inventory:
  *   get:
- *     summary: Отримати всі пристрої
- *     tags:
- *       - Inventory
+ *     summary: Отримати список усіх пристроїв
  *     responses:
  *       200:
  *         description: Список пристроїв
  */
-app.get("/inventory", (req, res) => res.json(inventory));
+app.get('/inventory', async (req, res) => {
+  const [rows] = await db.execute('SELECT * FROM inventory');
+  res.json(rows);
+});
 
 /**
  * @swagger
  * /inventory/{id}:
  *   get:
- *     summary: Отримати інформацію про конкретний пристрій
- *     tags:
- *       - Inventory
+ *     summary: Отримати пристрій за id
  *     parameters:
  *       - in: path
  *         name: id
@@ -129,94 +142,21 @@ app.get("/inventory", (req, res) => res.json(inventory));
  *         description: ID пристрою
  *     responses:
  *       200:
- *         description: Інформація про пристрій
+ *         description: Деталі пристрою
  *       404:
- *         description: Пристрій не знайдено
+ *         description: Не знайдено
  */
-app.get("/inventory/:id", (req, res) => {
-  const item = inventory.find(i => i.id === parseInt(req.params.id));
-  if (!item) return res.status(404).json({ error: "Not found" });
-  res.json(item);
+app.get('/inventory/:id', async (req, res) => {
+  const [rows] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Not found' });
+  res.json(rows[0]);
 });
 
 /**
  * @swagger
  * /inventory/{id}:
  *   put:
- *     summary: Оновлення даних пристрою
- *     tags:
- *       - Inventory
- *     parameters:
- *       - in: path
- *         name: id
- *         schema:
- *           type: integer
- *         required: true
- *         description: ID пристрою
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               inventory_name:
- *                 type: string
- *                 description: Назва пристрою
- *               description:
- *                 type: string
- *                 description: Опис пристрою
- *     responses:
- *       200:
- *         description: Дані оновлено
- *       404:
- *         description: Пристрій не знайдено
- */
-app.put("/inventory/:id", (req, res) => {
-  const item = inventory.find(i => i.id === parseInt(req.params.id));
-  if (!item) return res.status(404).json({ error: "Not found" });
-
-  const { inventory_name, description } = req.body;
-  if (inventory_name) item.inventory_name = inventory_name;
-  if (description) item.description = description;
-
-  res.json(item);
-});
-
-/**
- * @swagger
- * /inventory/{id}/photo:
- *   get:
- *     summary: Отримати фото пристрою
- *     tags:
- *       - Inventory
- *     parameters:
- *       - in: path
- *         name: id
- *         schema:
- *           type: integer
- *         required: true
- *         description: ID пристрою
- *     responses:
- *       200:
- *         description: Фото пристрою
- *       404:
- *         description: Фото не знайдено
- */
-app.get("/inventory/:id/photo", (req, res) => {
-  const item = inventory.find(i => i.id === parseInt(req.params.id));
-  if (!item || !item.photo) return res.status(404).json({ error: "Not found" });
-  const photoPath = path.join(options.cache, item.photo);
-  if (!fs.existsSync(photoPath)) return res.status(404).json({ error: "Not found" });
-  res.sendFile(photoPath);
-});
-
-/**
- * @swagger
- * /inventory/{id}/photo:
- *   put:
- *     summary: Оновлення фото пристрою
- *     tags:
- *       - Inventory
+ *     summary: Оновити пристрій
  *     parameters:
  *       - in: path
  *         name: id
@@ -230,37 +170,47 @@ app.get("/inventory/:id/photo", (req, res) => {
  *           schema:
  *             type: object
  *             properties:
+ *               inventory_name:
+ *                 type: string
+ *               description:
+ *                 type: string
  *               photo:
  *                 type: string
  *                 format: binary
- *                 description: Фото пристрою
  *     responses:
  *       200:
- *         description: Фото оновлено
+ *         description: Оновлено
  *       404:
- *         description: Пристрій не знайдено
+ *         description: Не знайдено
  */
-app.put("/inventory/:id/photo", upload.single("photo"), (req, res) => {
-  const item = inventory.find(i => i.id === parseInt(req.params.id));
-  if (!item) return res.status(404).json({ error: "Not found" });
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+app.put('/inventory/:id', upload.single('photo'), async (req, res) => {
+  const { inventory_name, description } = req.body;
+  const [existing] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  if (!existing.length) return res.status(404).json({ error: 'Not found' });
 
-  if (item.photo) {
-    const oldPhotoPath = path.join(options.cache, item.photo);
-    if (fs.existsSync(oldPhotoPath)) fs.unlinkSync(oldPhotoPath);
+  let photoFile = existing[0].photo;
+  if (req.file && photoFile) {
+    const oldPath = path.join(CACHE_DIR, photoFile);
+    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    photoFile = req.file.filename;
+  } else if (req.file) {
+    photoFile = req.file.filename;
   }
 
-  item.photo = req.file.filename;
-  res.json(item);
+  await db.execute(
+    'UPDATE inventory SET inventory_name = ?, description = ?, photo = ? WHERE id = ?',
+    [inventory_name || existing[0].inventory_name, description || existing[0].description, photoFile, req.params.id]
+  );
+
+  const [updated] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  res.json(updated[0]);
 });
 
 /**
  * @swagger
  * /inventory/{id}:
  *   delete:
- *     summary: Видалення пристрою
- *     tags:
- *       - Inventory
+ *     summary: Видалити пристрій
  *     parameters:
  *       - in: path
  *         name: id
@@ -270,92 +220,127 @@ app.put("/inventory/:id/photo", upload.single("photo"), (req, res) => {
  *         description: ID пристрою
  *     responses:
  *       200:
- *         description: Пристрій видалено
+ *         description: Видалено
  *       404:
- *         description: Пристрій не знайдено
+ *         description: Не знайдено
  */
-app.delete("/inventory/:id", (req, res) => {
-  const index = inventory.findIndex(i => i.id === parseInt(req.params.id));
-  if (index === -1) return res.status(404).json({ error: "Not found" });
+app.delete('/inventory/:id', async (req, res) => {
+  const [rows] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Not found' });
 
-  const deletedItem = inventory.splice(index, 1)[0];
-  if (deletedItem.photo) {
-    const photoPath = path.join(options.cache, deletedItem.photo);
-    if (fs.existsSync(photoPath)) fs.unlinkSync(photoPath);
+  const photoFile = rows[0].photo;
+  if (photoFile) {
+    const fp = path.join(CACHE_DIR, photoFile);
+    if (fs.existsSync(fp)) fs.unlinkSync(fp);
   }
 
-  res.json(deletedItem);
+  await db.execute('DELETE FROM inventory WHERE id = ?', [req.params.id]);
+  res.json({ ok: true, deleted_id: Number(req.params.id) });
 });
 
 /**
  * @swagger
- * /RegisterForm.html:
+ * /inventory/{id}/photo:
  *   get:
- *     summary: Форма для реєстрації пристрою
- *     tags:
- *       - Forms
+ *     summary: Отримати фото пристрою
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: ID пристрою
  *     responses:
  *       200:
- *         description: HTML сторінка
+ *         description: Фото
+ *       404:
+ *         description: Не знайдено
  */
-app.get("/RegisterForm.html", (req, res) =>
-  res.sendFile(path.join(process.cwd(), "public", "RegisterForm.html"))
-);
+app.get('/inventory/:id/photo', async (req, res) => {
+  const [rows] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  if (!rows.length || !rows[0].photo) return res.status(404).json({ error: 'Not found' });
+
+  const photoPath = path.join(CACHE_DIR, rows[0].photo);
+  if (!fs.existsSync(photoPath)) return res.status(404).json({ error: 'File not found' });
+
+  res.sendFile(photoPath);
+});
 
 /**
  * @swagger
- * /SearchForm.html:
- *   get:
- *     summary: Форма для пошуку пристрою
- *     tags:
- *       - Forms
+ * /inventory/{id}/photo:
+ *   put:
+ *     summary: Оновити фото пристрою
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: ID пристрою
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               photo:
+ *                 type: string
+ *                 format: binary
  *     responses:
  *       200:
- *         description: HTML сторінка
+ *         description: Фото оновлено
+ *       404:
+ *         description: Не знайдено
  */
-app.get("/SearchForm.html", (req, res) =>
-  res.sendFile(path.join(process.cwd(), "public", "SearchForm.html"))
-);
+app.put('/inventory/:id/photo', upload.single('photo'), async (req, res) => {
+  const [existing] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  if (!existing.length) return res.status(404).json({ error: 'Not found' });
+
+  if (!req.file) return res.status(400).json({ error: 'photo is required' });
+
+  const oldPhoto = existing[0].photo;
+  if (oldPhoto) {
+    const oldPath = path.join(CACHE_DIR, oldPhoto);
+    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+  }
+
+  await db.execute('UPDATE inventory SET photo = ? WHERE id = ?', [req.file.filename, req.params.id]);
+  const [updated] = await db.execute('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+  res.json(updated[0]);
+});
 
 /**
  * @swagger
  * /search:
  *   post:
- *     summary: Пошук пристрою за ID
- *     tags:
- *       - Inventory
+ *     summary: Шукати пристрій за inventory_name
  *     requestBody:
+ *       required: true
  *       content:
- *         application/x-www-form-urlencoded:
+ *         application/json:
  *           schema:
  *             type: object
  *             properties:
- *               id:
- *                 type: integer
- *                 description: ID пристрою
- *               has_photo:
- *                 type: boolean
- *                 description: Повернути фото чи ні
+ *               query:
+ *                 type: string
  *     responses:
  *       200:
- *         description: Пристрій знайдено
- *       404:
- *         description: Пристрій не знайдено
+ *         description: Результати пошуку
  */
-app.post("/search", (req, res) => {
-  const { id, has_photo } = req.body;
-  const item = inventory.find(i => i.id === parseInt(id));
-  if (!item) return res.status(404).json({ error: "Not found" });
+app.post('/search', async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: 'query is required' });
 
-  const result = { ...item };
-  if (!has_photo) delete result.photo;
-  res.json(result);
+  const [rows] = await db.execute(
+    'SELECT * FROM inventory WHERE inventory_name LIKE ?',
+    [`%${query}%`]
+  );
+  res.json(rows);
 });
 
-// ===================== 405 =====================
-app.use((req, res) => res.status(405).json({ error: "Method not allowed" }));
 
 // ===================== START SERVER =====================
-app.listen(options.port, options.host, () =>
-  console.log(`Server running at http://${options.host}:${options.port}/`)
-);
+app.listen(PORT, HOST, () => console.log(`🚀 Server running at http://${HOST}:${PORT}`));
+
